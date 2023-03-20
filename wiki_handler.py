@@ -1,4 +1,5 @@
 
+import os
 import re
 import lxml
 import logging
@@ -8,9 +9,9 @@ from bs4 import BeautifulSoup
 from urllib import parse as urlparse
 from requests_ntlm import HttpNtlmAuth
 from bs4.element import Tag, NavigableString
-from utils import create_tag, process_string
-from constants import USER_AGENT, WAIT_SECONDS
 from connection_handler import ConnectionHandler
+from utils import create_tag, is_file_url, process_string, get_tag_attribute
+from constants import USER_AGENT, WAIT_SECONDS, TEMPLATE_HYPERLINK, TEMPLATE_SPOILED_IMAGE
 
 
 class WikiHandler(ConnectionHandler):
@@ -18,6 +19,7 @@ class WikiHandler(ConnectionHandler):
         super().__init__()
         self.root_url = ""
         self.table_of_contents_header = ""
+        self.attachments = list()
 
     def connect(self):
         del self.client
@@ -32,9 +34,11 @@ class WikiHandler(ConnectionHandler):
         super().connect()
 
     def import_url(self, s: str):
-        s = urlparse.unquote(s.strip())
-        if not s.startswith("http"):
-            s = urlparse.urljoin(self.root_url, s)
+        s = s.strip()
+        if len(s) > 0:
+            s = urlparse.unquote(s)
+            if not s.startswith("http"):
+                s = urlparse.urljoin(self.root_url, s)
         return s
 
     def get_page(self, url: str, empty_content_retries: int = 5):
@@ -60,6 +64,14 @@ class WikiHandler(ConnectionHandler):
         logging.critical("Exceeded empty content retries count for the URL: '{}'".format(url))
         raise ValueError()
 
+    def add_attachment(self, url: str):
+        url = self.import_url(url)
+        logging.debug(f"Add attachment: '{url}'")
+        self.attachments.append(dict(
+            file_content=self.get_page(url),
+            file_basename=os.path.basename(url),
+        ))
+
     def process_tag(self, tag: Tag) -> None:
         if isinstance(tag, NavigableString):
             text = process_string(tag.text)
@@ -73,39 +85,57 @@ class WikiHandler(ConnectionHandler):
                     self.process_tag(child)
         if not hasattr(tag, "name") or tag.name is None:
             return
-        t = str(tag.name)
-        if t == "div":
-            # Table of contents
+        logging.debug(f"Process as '{str(tag.name)}': '{str(tag)}'")
+        if str(tag.name) == "div":
             try:
                 if tag["id"] == "toc":
+                    logging.debug("Table of contents found")
                     tag.replace_with(
                         create_tag(
                             "p",
-                            f"<b id=\"toc\">{self.table_of_contents_header}</b>\n<ac:structured-macro ac:name=\"toc\"/>",
+                            f"<b id=\"toc\">{self.table_of_contents_header}</b>"
+                            "<ac:structured-macro ac:name=\"toc\"/>",
                             {"mock-id": "toc"}
                         )
                     )
             except KeyError:
                 pass
             return
-        if t.startswith("h"):
-            text = tag.text
-            header_number = re.findall("h([0-9]+)", t)
+        if str(tag.name).startswith("h"):
+            header_number = re.findall("h([0-9]+)", str(tag.name))
             if len(header_number) == 1:
                 header_number = int(header_number[0])
-                bold_tag = tag.find("b")
-                if bold_tag is not None:
-                    text = bold_tag.text
-                text = text.replace("[править | edit source]", "")
-                tag.replace_with(create_tag(f"h{header_number}", text))
-        if t == "a":
-            url = urlparse.unquote(tag["href"])
-            if len(re.findall(".+(\.[a-z]{3})$", url)) > 0:
-                tag["href"] = self.import_url(url)
-        if t == "img":
-            tag["src"] = self.import_url(tag["src"])
+                text = tag.find("span", {"class": "mw-headline"})
+                if text is not None:
+                    tag.replace_with(create_tag(f"h{header_number}", text.text))
+        if str(tag.name) == "a":
+            url = self.import_url(get_tag_attribute(tag, "href"))
+            if is_file_url(url):
+                if get_tag_attribute(tag, "class") == "image" or "Файл:" in url:
+                    logging.debug(f"Image URL found: '{url}'")
+                    tag.replaceWithChildren()
+                else:
+                    logging.debug(f"Non-image URL found: '{url}'")
+                    self.add_attachment(url)
+                    body = TEMPLATE_HYPERLINK.format(
+                        basename=os.path.basename(url),
+                        link_text=tag.text
+                    )
+                    tag.replace_with(create_tag("ac:link", body))
+        if str(tag.name) == "img":
+            url = self.import_url(get_tag_attribute(tag, "src"))
+            logging.debug(f"Image source URL found: '{url}'")
+            if is_file_url(url):
+                self.add_attachment(url)
+                basename = os.path.basename(url)
+                body = TEMPLATE_SPOILED_IMAGE.format(
+                    basename=basename,
+                    filename=os.path.splitext(basename)[0]
+                )
+                tag.replace_with(create_tag("ac:structured-macro", body, {"ac:name": "expand"}))
 
     def process_page(self, url: str):
+        url = self.import_url(url)
         soup = BeautifulSoup(
             self.get_page(url),
             features="lxml"
@@ -113,11 +143,15 @@ class WikiHandler(ConnectionHandler):
 
         first_heading = soup.find("h1", {"id": "firstHeading"}).text
         contents = soup.find("div", {"class": "mw-parser-output"}).contents
+        self.attachments = list()
         for parent in contents:
             self.process_tag(parent)
 
         content_body = "".join(str(i) for i in contents)
+        logging.debug("Processed content body to be uploaded is below")
+        logging.debug(content_body)
         return dict(
-            title=first_heading,
-            body=content_body
+            page_title=first_heading,
+            page_body=content_body,
+            page_attachments=list(self.attachments),
         )

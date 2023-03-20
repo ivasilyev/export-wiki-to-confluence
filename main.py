@@ -22,12 +22,11 @@ def run():
     urls = p_handler.extract_urls()
     for idx, url in enumerate(urls):
         logging.info(f"Process URL {idx + 1} of {len(urls)}")
-
-        html_dict = w_handler.process_page(url)
-        c_handler.push_html(**html_dict)
+        processed_page_dict = w_handler.process_page(url)
+        c_handler.push_page(**processed_page_dict)
 
 
 if __name__ == '__main__':
     run()
 
-# python main.py
+# python main.py > main.log 2>&1

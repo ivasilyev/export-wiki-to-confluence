@@ -1,8 +1,10 @@
 
+import os
 import re
 import logging
 from bs4.element import Tag
 from bs4 import BeautifulSoup
+from constants import CONFLUENCE_ATTACHMENT_SIZE_LIMIT
 
 
 def process_string(s: str):
@@ -56,3 +58,15 @@ def is_file_url(s: str) -> bool:
         logging.debug("Not a file URL: '{}'".format(s))
     return b
 
+
+def is_valid_size(x):
+    from sys import getsizeof
+    z = getsizeof(x)
+    o = z < CONFLUENCE_ATTACHMENT_SIZE_LIMIT
+    if not o:
+        logging.warning(f"The object size exceeds Confluence limits: {z}")
+    return o
+
+
+def filename_only(s: str):
+    return os.path.splitext(os.path.basename(s))[0]

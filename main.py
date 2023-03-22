@@ -8,7 +8,7 @@ from confluence_handler import ConfluenceHandler
 
 def run():
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format=LOGGING_TEMPLATE
     )
 
@@ -23,7 +23,8 @@ def run():
     for idx, url in enumerate(urls):
         logging.info(f"Process URL {idx + 1} of {len(urls)}")
         processed_page_dict = w_handler.process_page(url)
-        c_handler.push_page(**processed_page_dict)
+        if "page_body" in processed_page_dict.keys():
+            c_handler.push_page(**processed_page_dict)
 
 
 if __name__ == '__main__':

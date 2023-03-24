@@ -6,12 +6,22 @@ import logging
 from time import sleep
 from requests import Session
 from bs4 import BeautifulSoup
+from mimetypes import guess_type
 from urllib import parse as urlparse
 from requests_ntlm import HttpNtlmAuth
 from bs4.element import Tag, NavigableString
 from connection_handler import ConnectionHandler
-from constants import TEMPLATE_HYPERLINK, TEMPLATE_SPOILED_IMAGE, USER_AGENT, WAIT_SECONDS
-from utils import create_tag, filename_only, get_tag_attribute, is_file_url, is_valid_size, process_string
+from constants import TEMPLATE_HYPERLINK, TEMPLATE_SPOILED_IMAGE, USER_AGENT, WAIT_SECONDS, WIKI_ATTACHMENT_PAGE_PREFIX
+from utils import (
+    create_tag,
+    filename_only,
+    get_tag_attribute,
+    is_file_url,
+    is_image,
+    is_valid_size,
+    process_string,
+    remove_tag_children
+)
 
 
 class WikiHandler(ConnectionHandler):
@@ -47,7 +57,13 @@ class WikiHandler(ConnectionHandler):
         return s
 
     def is_valid_file_url(self, s: str):
-        return is_file_url(s) and s.startswith(self.root_url)
+        return (
+            s.startswith(self.root_url)
+            and (
+                guess_type(s)[0] is not None
+                or is_file_url(s)
+            )
+        )
 
     def get_page(self, url: str, empty_content_retries: int = 5):
         url = self.import_url(url)
@@ -84,6 +100,12 @@ class WikiHandler(ConnectionHandler):
         logging.critical("Exceeded empty content retries count for the URL: '{}'".format(url))
         return b""
 
+    def get_soup(self, *args, **kwargs):
+        return BeautifulSoup(
+            self.get_page(*args, **kwargs),
+            features="lxml"
+        )
+
     def add_attachment(self, url: str):
         url = self.import_url(url)
         logging.debug(f"Add attachment: '{url}'")
@@ -105,7 +127,7 @@ class WikiHandler(ConnectionHandler):
             if len(children) > 0:
                 for child in children:
                     self.process_tag(child)
-        if not hasattr(tag, "name") or tag.name is None:
+        if not hasattr(tag, "name") or tag.name is None or tag.name.startswith("ac:"):
             return
         logging.debug(f"Process as '{str(tag.name)}': '{str(tag)}'")
         if str(tag.name) == "div":
@@ -117,23 +139,30 @@ class WikiHandler(ConnectionHandler):
                         create_tag(
                             "p",
                             f"<b id=\"toc\">{self.table_of_contents_header}</b>"
-                            "<ac:structured-macro ac:name=\"toc\"/>",
-                            {"mock-id": "toc"}
+                            "<ac:structured-macro ac:name=\"toc\" />",
                         )
                     )
-                # Adobe managed to create blackhole when one tries to download FlashPlayer
-                if get_tag_attribute(tag, "class") == "wikiFlvPlayer":
-                    logging.debug("Remove Adobe FlashPlayer download advertisement")
-                    tag.replace_with("")
+                _class = get_tag_attribute(tag, "class")
+                if _class in ("wikiFlvPlayer", "magnify"):
+                    remove_tag_children(tag)
+                    logging.debug(f"Remove tag with class '{_class}'")
+                    tag.decompose()
+                if _class in ("thumbinner", ):
+                    logging.debug(f"Replace tag with forbidden class '{_class}'")
+                    tag.replace_with_children()
+                if _class == "thumbcaption":
+                    remove_tag_children(tag)
+                    tag.replace_with(create_tag("p", tag.text))
             except KeyError:
                 pass
-            return
         if str(tag.name) == "script" and get_tag_attribute(tag, "type") == "text/javascript":
             if "/extensions/wikiFlvPlayer/player.swf" in tag.text:
-                video = re.findall("os\.addVariable\(\"file\",\"([^\"]+)\"\)", tag.text)
+                video = re.findall("so\.addVariable\(\"file\",\"([^\"]+)\"\)", tag.text)
                 if len(video) > 0:
                     video = video[0]
+                    logging.debug(f"Found Adobe Flash video: '{video}'")
                     t = create_tag("a", filename_only(video), {"href": video})
+                    remove_tag_children(tag)
                     tag.replace_with(t)
                     tag = t
         if str(tag.name).startswith("h"):
@@ -144,40 +173,43 @@ class WikiHandler(ConnectionHandler):
                 if text is not None:
                     tag.replace_with(create_tag(f"h{header_number}", text.text))
         if str(tag.name) == "a":
+            if get_tag_attribute(tag, "href").startswith("#"):
+                return
             url = self.import_url(get_tag_attribute(tag, "href"))
             if self.is_valid_file_url(url):
-                if get_tag_attribute(tag, "class") == "image" or "Файл:" in url:
+                if os.path.basename(url).startswith(WIKI_ATTACHMENT_PAGE_PREFIX):
+                    soup = self.get_soup(url)
+                    a = soup.find("a", {"class": "internal"})
+                    url = self.import_url(get_tag_attribute(a, "href"))
+                    if url is None:
+                        return
+                    self.add_attachment(url)
+                if is_image(url):
                     logging.debug(f"Image URL found: '{url}'")
-                    tag.replaceWithChildren()
+                    basename = os.path.basename(url)
+                    body = TEMPLATE_SPOILED_IMAGE.format(
+                        basename=basename,
+                        filename=filename_only(url),
+                    )
+                    tag.replace_with(create_tag("ac:structured-macro", body, {"ac:name": "expand"}))
                 else:
                     logging.debug(f"Non-image URL found: '{url}'")
-                    self.add_attachment(url)
+                    text = tag.text
+                    basename = os.path.basename(url)
+                    if WIKI_ATTACHMENT_PAGE_PREFIX in text:
+                        text = " {} ".format(basename)
                     body = TEMPLATE_HYPERLINK.format(
-                        basename=os.path.basename(url),
-                        link_text=tag.text
+                        basename=basename,
+                        link_text=text
                     )
                     tag.replace_with(create_tag("ac:link", body))
-        if str(tag.name) == "img":
-            url = self.import_url(get_tag_attribute(tag, "src"))
-            logging.debug(f"Image source URL found: '{url}'")
-            if self.is_valid_file_url(url):
-                self.add_attachment(url)
-                basename = os.path.basename(url)
-                body = TEMPLATE_SPOILED_IMAGE.format(
-                    basename=basename,
-                    filename=filename_only(url)
-                )
-                tag.replace_with(create_tag("ac:structured-macro", body, {"ac:name": "expand"}))
+                remove_tag_children(tag)
+        if str(tag.name) in ("img", "script"):
+            tag.decompose()
 
     def process_page(self, url: str):
         url = self.import_url(url)
-        response = self.get_page(url)
-        if len(response) == 0:
-            return dict()
-        soup = BeautifulSoup(
-            response,
-            features="lxml"
-        ).find("div", {"id": "content"})
+        soup = self.get_soup(url).find("div", {"id": "content"})
 
         first_heading = soup.find("h1", {"id": "firstHeading"}).text
         contents = soup.find("div", {"class": "mw-parser-output"}).contents

@@ -130,6 +130,9 @@ class WikiHandler(ConnectionHandler):
         if not hasattr(tag, "name") or tag.name is None or tag.name.startswith("ac:"):
             return
         logging.debug(f"Process as '{str(tag.name)}': '{str(tag)}'")
+        if len(get_tag_attribute(tag, "style")) > 0:
+            logging.debug(f"Clear style")
+            del tag["style"]
         if str(tag.name) == "div":
             try:
                 # Reflect Table of Contents by Confluence macro
@@ -147,7 +150,7 @@ class WikiHandler(ConnectionHandler):
                     remove_tag_children(tag)
                     logging.debug(f"Remove tag with class '{_class}'")
                     tag.decompose()
-                if _class in ("thumbinner", ):
+                if _class in ("thumbinner", "thumb"):
                     logging.debug(f"Replace tag with forbidden class '{_class}'")
                     tag.replace_with_children()
                 if _class == "thumbcaption":

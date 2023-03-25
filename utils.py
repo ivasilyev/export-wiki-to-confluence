@@ -4,7 +4,6 @@ import re
 import logging
 from bs4.element import Tag
 from bs4 import BeautifulSoup
-from constants import FILE_EXTENSIONS, CONFLUENCE_ATTACHMENT_SIZE_LIMIT
 
 
 def process_string(s: str):
@@ -56,26 +55,39 @@ def get_tag_attribute(tag: Tag, attribute: str) -> str:
         value = ""
     if isinstance(value, list):
         value = value[0]
-    logging.debug(f"The attribute is '{value}'")
+    if len(value) > 0:
+        logging.debug(f"The attribute value is '{value}'")
     return value
 
 
 def is_file_url(s: str) -> bool:
+    from constants import FILE_EXTENSIONS
     s = s.strip().lower()
     return any(s.endswith(f".{i}") for i in FILE_EXTENSIONS)
 
 
 def is_valid_size(x):
-    from sys import getsizeof
-    z = getsizeof(x)
+    from constants import CONFLUENCE_ATTACHMENT_SIZE_LIMIT
+    z = int(x)
     o = z < CONFLUENCE_ATTACHMENT_SIZE_LIMIT
-    if not o:
+    if o:
+        logging.debug(f"The object size does not exceed Confluence limits: {z}")
+    else:
         logging.warning(f"The object size exceeds Confluence limits: {z}")
     return o
 
 
 def filename_only(s: str):
     return os.path.splitext(os.path.basename(s))[0]
+
+
+def is_attachment(s: str):
+    from constants import WIKI_ATTACHMENT_PAGE_PREFIXES
+    bn = s.split("/")[-1]
+    o = any(bn.startswith(f"{i}:") for i in WIKI_ATTACHMENT_PAGE_PREFIXES)
+    if o:
+        logging.debug(f"Attachment found: '{s}'")
+    return o
 
 
 def is_image(s: str):

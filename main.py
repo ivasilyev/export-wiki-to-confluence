@@ -20,6 +20,9 @@ def run():
     c_handler.connect()
 
     urls = p_handler.extract_urls()
+    urls = [
+        "https://wiki.appline.ru/index.php/%D0%A3%D1%80%D0%BE%D0%BA%D0%B8_%D0%BF%D0%BE_JMeter",
+    ]
     for idx, url in enumerate(urls):
         logging.info(f"Process URL {idx + 1} of {len(urls)}")
         processed_page_dict = w_handler.process_page(url)

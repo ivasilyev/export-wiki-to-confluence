@@ -11,11 +11,17 @@ from urllib import parse as urlparse
 from requests_ntlm import HttpNtlmAuth
 from bs4.element import Tag, NavigableString
 from connection_handler import ConnectionHandler
-from constants import TEMPLATE_HYPERLINK, TEMPLATE_SPOILED_IMAGE, USER_AGENT, WAIT_SECONDS, WIKI_ATTACHMENT_PAGE_PREFIX
+from constants import (
+    TEMPLATE_HYPERLINK,
+    TEMPLATE_SPOILED_IMAGE,
+    USER_AGENT,
+    WAIT_SECONDS,
+)
 from utils import (
     create_tag,
     filename_only,
     get_tag_attribute,
+    is_attachment,
     is_file_url,
     is_image,
     is_valid_size,
@@ -57,13 +63,16 @@ class WikiHandler(ConnectionHandler):
         return s
 
     def is_valid_file_url(self, s: str):
-        return (
+        o = (
             s.startswith(self.root_url)
             and (
                 guess_type(s)[0] is not None
                 or is_file_url(s)
             )
         )
+        if o:
+            logging.debug(f"File URL found: '{s}'")
+        return o
 
     def get_page(self, url: str, empty_content_retries: int = 5):
         url = self.import_url(url)
@@ -81,6 +90,7 @@ class WikiHandler(ConnectionHandler):
                         sleep(WAIT_SECONDS)
                         self.connect()
                     continue
+                logging.debug(f"Check size for '{url}'")
                 if not is_valid_size(head.headers.get("content-length", -1)):
                     logging.warning(f"Skip the URL due to excess file size: '{url}'")
                     return b""
@@ -115,6 +125,17 @@ class WikiHandler(ConnectionHandler):
                 file_content=content,
                 file_basename=os.path.basename(url),
             ))
+            return True
+        logging.debug(f"The attachment was not added: '{url}'")
+        return False
+
+    def extract_flash(self, s: str):
+        video = re.findall("so\.addVariable\(\"file\",\"([^\"]+)\"\)", s)
+        if len(video) > 0:
+            video = video[0]
+            logging.debug(f"Found Adobe Flash video: '{video}'")
+            return create_tag("a", filename_only(video), {"href": video})
+        return create_tag("p", "")
 
     def process_tag(self, tag: Tag) -> None:
         if isinstance(tag, NavigableString):
@@ -128,6 +149,7 @@ class WikiHandler(ConnectionHandler):
                 for child in children:
                     self.process_tag(child)
         if not hasattr(tag, "name") or tag.name is None or tag.name.startswith("ac:"):
+            logging.debug(f"Not to be processed: '{str(tag)}'")
             return
         logging.debug(f"Process as '{str(tag.name)}': '{str(tag)}'")
         if len(get_tag_attribute(tag, "style")) > 0:
@@ -159,15 +181,15 @@ class WikiHandler(ConnectionHandler):
             except KeyError:
                 pass
         if str(tag.name) == "script" and get_tag_attribute(tag, "type") == "text/javascript":
-            if "/extensions/wikiFlvPlayer/player.swf" in tag.text:
-                video = re.findall("so\.addVariable\(\"file\",\"([^\"]+)\"\)", tag.text)
-                if len(video) > 0:
-                    video = video[0]
-                    logging.debug(f"Found Adobe Flash video: '{video}'")
-                    t = create_tag("a", filename_only(video), {"href": video})
-                    remove_tag_children(tag)
-                    tag.replace_with(t)
-                    tag = t
+            if "wikiFlvPlayer" in get_tag_attribute(tag, "src"):
+                remove_tag_children(tag)
+                tag.decompose()
+                return
+        if "/extensions/wikiFlvPlayer/player.swf" in str(tag):
+            t = self.extract_flash(tag)
+            remove_tag_children(tag)
+            tag.replace_with(t)
+            tag = t
         if str(tag.name).startswith("h"):
             header_number = re.findall("h([0-9]+)", str(tag.name))
             if len(header_number) == 1:
@@ -176,38 +198,45 @@ class WikiHandler(ConnectionHandler):
                 if text is not None:
                     tag.replace_with(create_tag(f"h{header_number}", text.text))
         if str(tag.name) == "a":
-            if get_tag_attribute(tag, "href").startswith("#"):
+            url = get_tag_attribute(tag, "href")
+            if url.startswith("#"):  # Internal URL
                 return
-            url = self.import_url(get_tag_attribute(tag, "href"))
+            url = self.import_url(url)
             if self.is_valid_file_url(url):
-                if os.path.basename(url).startswith(WIKI_ATTACHMENT_PAGE_PREFIX):
+                if is_attachment(url):
                     soup = self.get_soup(url)
-                    a = soup.find("a", {"class": "internal"})
-                    url = self.import_url(get_tag_attribute(a, "href"))
-                    if url is None:
-                        return
-                    self.add_attachment(url)
-                if is_image(url):
-                    logging.debug(f"Image URL found: '{url}'")
-                    basename = os.path.basename(url)
-                    body = TEMPLATE_SPOILED_IMAGE.format(
-                        basename=basename,
-                        filename=filename_only(url),
-                    )
-                    tag.replace_with(create_tag("ac:structured-macro", body, {"ac:name": "expand"}))
+                    if len(soup) > 0:
+                        a = soup.find("a", {"class": "internal"})
+                        url_2 = self.import_url(get_tag_attribute(a, "href"))
+                        if url_2 is not None:
+                            url = url_2
+                    else:
+                        logging.debug(f"Unable to parse URL as web page: '{url}'")
+                if self.add_attachment(url):
+                    if is_image(url):
+                        logging.debug(f"Image URL found: '{url}'")
+                        basename = os.path.basename(url)
+                        body = TEMPLATE_SPOILED_IMAGE.format(
+                            basename=basename,
+                            filename=filename_only(url),
+                        )
+                        tag.replace_with(create_tag("ac:structured-macro", body, {"ac:name": "expand"}))
+                    else:
+                        logging.debug(f"Non-image URL found: '{url}'")
+                        text = tag.text
+                        basename = os.path.basename(url)
+                        if is_attachment(text):
+                            text = " {} ".format(basename)
+                        body = TEMPLATE_HYPERLINK.format(
+                            basename=basename,
+                            link_text=text
+                        )
+                        tag.replace_with(create_tag("ac:link", body))
                 else:
-                    logging.debug(f"Non-image URL found: '{url}'")
-                    text = tag.text
-                    basename = os.path.basename(url)
-                    if WIKI_ATTACHMENT_PAGE_PREFIX in text:
-                        text = " {} ".format(basename)
-                    body = TEMPLATE_HYPERLINK.format(
-                        basename=basename,
-                        link_text=text
-                    )
-                    tag.replace_with(create_tag("ac:link", body))
+                    tag.replace_with(create_tag("p", " [Not available] "))
                 remove_tag_children(tag)
         if str(tag.name) in ("img", "script"):
+            remove_tag_children(tag)
             tag.decompose()
 
     def process_page(self, url: str):

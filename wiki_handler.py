@@ -29,6 +29,10 @@ from utils import (
     remove_tag_children
 )
 
+# The following string fails to parse while using head recursion,
+# the tail recursion seems to be OK, but other subroutine parsers appear to be broken in such fashion:
+# <script type="text/javascript">/*<![CDATA[*/var so = new SWFObject("/extensions/wikiFlvPlayer/player.swf","player","400","300","9");so.addParam("allowfullscreen","true");so.addParam("allowscriptaccess","always");so.addParam("wmode","opaque");so.addVariable("file","/img_auth.php/Lesson_1.flv");so.addVariable("backcolor","0x000000");so.addVariable("frontcolor","0xCCCCCC");so.addVariable("lightcolor","0xFF9900");so.addVariable("screencolor","0x333333");so.addVariable("height","300");so.addVariable("width","400");so.addVariable("autostart","false");so.addVariable("bufferlength","3");so.addVariable("logo","/extensions/wikiFlvPlayer/logo.png");so.addVariable("quality", "true");so.addVariable("repeat","false");so.addVariable("volume","50");so.write("flvpid-xn5plbd8jvh9joxcns2nb8dj9");/*]]>*/</script>
+
 
 class WikiHandler(ConnectionHandler):
     def __init__(self):
